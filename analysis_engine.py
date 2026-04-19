@@ -1,66 +1,75 @@
-def analyze_financials(company_df, company_name="A公司"):
-    # ===== 检查数据是否为空 =====
-    if company_df.empty:
-        return {
-            "error": f"没有找到公司：{company_name}"
-        }
+import pandas as pd
 
-    # ===== 排序 =====
-    company_df = company_df.sort_values("report_period")
 
-    if len(company_df) < 2:
-        return {
-            "error": "数据不足（至少需要2期）"
-        }
+def calc_yoy(current, previous):
+    try:
+        if current is None or previous is None or pd.isna(current) or pd.isna(previous):
+            return None
+        if previous == 0:
+            return None
+        return round((current - previous) / abs(previous) * 100, 2)
+    except Exception:
+        return None
 
-    # ===== 取最近两期 =====
-    previous = company_df.iloc[-2]
-    current = company_df.iloc[-1]
 
-    # ===== 计算同比 =====
-    def growth_rate(curr, prev):
-        if prev == 0:
-            return 0
-        return (curr - prev) / prev
+def compare_two_periods(df: pd.DataFrame):
+    if df is None or df.empty or len(df) < 2:
+        return None, None
 
-    revenue_yoy = growth_rate(current["revenue"], previous["revenue"])
-    ar_yoy = growth_rate(current["accounts_receivable"], previous["accounts_receivable"])
-    inventory_yoy = growth_rate(current["inventory"], previous["inventory"])
+    current = df.iloc[0]
+    previous = df.iloc[1]
+    return current, previous
 
-    # ===== 风险判断 =====
+
+def analyze_financials(df: pd.DataFrame, ticker: str) -> dict:
+    if df is None or df.empty:
+        return {"error": "无法获取有效财报数据"}
+
+    current, previous = compare_two_periods(df)
+    if current is None or previous is None:
+        return {"error": "财报期数不足，至少需要两期"}
+
+    revenue_yoy = calc_yoy(current.get("revenue"), previous.get("revenue"))
+    ar_yoy = calc_yoy(current.get("accounts_receivable"), previous.get("accounts_receivable"))
+    inventory_yoy = calc_yoy(current.get("inventory"), previous.get("inventory"))
+
     risks = []
-
-    if revenue_yoy > 0.3 and ar_yoy > revenue_yoy:
-        risks.append("应收账款增长快于营收 → 回款风险")
-
-    if current["operating_cashflow"] < current["net_profit"]:
-        risks.append("经营现金流低于净利润 → 利润质量偏弱")
-
-    if inventory_yoy > revenue_yoy:
-        risks.append("存货增长快于营收 → 库存积压风险")
-
-    # ===== 记忆（趋势分析）=====
     memory_notes = []
 
-    if len(company_df) >= 3:
-        third = company_df.iloc[-3]
+    current_ocf = current.get("operating_cashflow")
+    current_profit = current.get("net_profit")
 
-        if third["accounts_receivable"] < previous["accounts_receivable"] < current["accounts_receivable"]:
-            memory_notes.append("应收账款连续两期上升（风险在累积）")
+    if pd.notna(current_ocf) and pd.notna(current_profit):
+        if current_ocf < current_profit:
+            risks.append("经营现金流低于净利润 → 利润质量偏弱")
 
-        if third["inventory"] < previous["inventory"] < current["inventory"]:
-            memory_notes.append("存货连续两期上升（库存压力增加）")
+    if revenue_yoy is not None and ar_yoy is not None:
+        if ar_yoy > revenue_yoy + 10:
+            risks.append("应收账款增长显著快于营收 → 回款风险")
 
-        if (
-            previous["operating_cashflow"] < previous["net_profit"]
-            and current["operating_cashflow"] < current["net_profit"]
-        ):
-            memory_notes.append("经营现金流连续两期弱于利润（问题持续）")
+    if revenue_yoy is not None and inventory_yoy is not None:
+        if inventory_yoy > revenue_yoy + 10:
+            risks.append("存货增长显著快于营收 → 库存积压风险")
 
-    # ===== 风险评分 =====
+    if revenue_yoy is not None and revenue_yoy < 0:
+        risks.append("营收同比下滑 → 增长压力")
+
+    if len(df) >= 3:
+        ar_series = df["accounts_receivable"].dropna()
+        inv_series = df["inventory"].dropna()
+
+        if len(ar_series) >= 3:
+            if ar_series.iloc[0] > ar_series.iloc[1] > ar_series.iloc[2]:
+                memory_notes.append("应收账款连续两期上升（风险在累积）")
+
+        if len(inv_series) >= 3:
+            if inv_series.iloc[0] > inv_series.iloc[1] > inv_series.iloc[2]:
+                memory_notes.append("存货连续两期上升（可能库存积压）")
+
     score = 100
     score -= len(risks) * 10
     score -= len(memory_notes) * 5
+    score = max(0, min(100, score))
 
     if score >= 85:
         risk_level = "低风险"
@@ -73,16 +82,15 @@ def analyze_financials(company_df, company_name="A公司"):
     else:
         risk_level = "高风险"
 
-    # ===== 返回结果（不给print，交给网页显示）=====
     return {
-        "company_name": current["company_name"],
-        "current_period": current["report_period"],
-        "previous_period": previous["report_period"],
-        "revenue_yoy": round(revenue_yoy * 100, 2),
-        "ar_yoy": round(ar_yoy * 100, 2),
-        "inventory_yoy": round(inventory_yoy * 100, 2),
+        "company_name": ticker,
+        "current_period": current.get("report_period", "未知"),
+        "previous_period": previous.get("report_period", "未知"),
+        "revenue_yoy": revenue_yoy,
+        "ar_yoy": ar_yoy,
+        "inventory_yoy": inventory_yoy,
         "risks": risks,
         "memory_notes": memory_notes,
         "score": score,
-        "risk_level": risk_level
+        "risk_level": risk_level,
     }
