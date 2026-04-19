@@ -11,42 +11,71 @@ def detect_market(ticker: str) -> str:
     return "美股"
 
 
-def safe_to_number(x):
+def safe_to_number(x, default=0.0):
     try:
+        if x is None:
+            return default
         if pd.isna(x):
-            return None
+            return default
         return float(x)
     except Exception:
-        return None
+        return default
 
 
-def first_existing(series_or_dict, candidates, default=None):
+def safe_date(x):
+    try:
+        return str(x.date()) if hasattr(x, "date") else str(x)
+    except Exception:
+        return str(x)
+
+
+def first_existing(series_or_dict, candidates, default=0.0):
     for name in candidates:
-        if name in series_or_dict:
-            value = series_or_dict.get(name)
-            if pd.notna(value):
-                return value
+        try:
+            if name in series_or_dict:
+                value = series_or_dict.get(name)
+                if pd.notna(value):
+                    return safe_to_number(value, default)
+        except Exception:
+            continue
     return default
 
 
-def normalize_date(x):
-    try:
-        if hasattr(x, "date"):
-            return str(x.date())
-        return str(x)
-    except Exception:
-        return str(x)
-
-
-def get_stock_bundle(ticker: str):
+def get_stock_bundle(ticker: str, history_period: str = "1y"):
     stock = yf.Ticker(ticker)
 
-    info = stock.info if stock.info else {}
-    history = stock.history(period="1y")
+    try:
+        info = stock.info if stock.info else {}
+    except Exception:
+        info = {}
 
-    financials = stock.financials.T if stock.financials is not None else pd.DataFrame()
-    balance = stock.balance_sheet.T if stock.balance_sheet is not None else pd.DataFrame()
-    cashflow = stock.cashflow.T if stock.cashflow is not None else pd.DataFrame()
+    try:
+        history = stock.history(period=history_period)
+        if history is None:
+            history = pd.DataFrame()
+    except Exception:
+        history = pd.DataFrame()
+
+    try:
+        financials = stock.financials.T if stock.financials is not None else pd.DataFrame()
+        if financials is None:
+            financials = pd.DataFrame()
+    except Exception:
+        financials = pd.DataFrame()
+
+    try:
+        balance = stock.balance_sheet.T if stock.balance_sheet is not None else pd.DataFrame()
+        if balance is None:
+            balance = pd.DataFrame()
+    except Exception:
+        balance = pd.DataFrame()
+
+    try:
+        cashflow = stock.cashflow.T if stock.cashflow is not None else pd.DataFrame()
+        if cashflow is None:
+            cashflow = pd.DataFrame()
+    except Exception:
+        cashflow = pd.DataFrame()
 
     return {
         "ticker": ticker,
@@ -65,8 +94,16 @@ def build_financial_df(bundle: dict) -> pd.DataFrame:
     balance = bundle["balance"]
     cashflow = bundle["cashflow"]
 
-    if financials.empty:
-        return pd.DataFrame()
+    if financials is None or financials.empty:
+        return pd.DataFrame(columns=[
+            "company_name",
+            "report_period",
+            "revenue",
+            "net_profit",
+            "operating_cashflow",
+            "accounts_receivable",
+            "inventory",
+        ])
 
     rows = []
 
@@ -78,41 +115,41 @@ def build_financial_df(bundle: dict) -> pd.DataFrame:
         revenue = first_existing(
             fin_row,
             ["Total Revenue", "Revenue", "Operating Revenue"],
-            default=None,
+            default=0.0,
         )
 
         net_profit = first_existing(
             fin_row,
             ["Net Income", "Net Income Common Stockholders", "Net Profit"],
-            default=None,
+            default=0.0,
         )
 
         operating_cashflow = first_existing(
             cf_row,
             ["Operating Cash Flow", "Cash Flow From Continuing Operating Activities"],
-            default=None,
+            default=0.0,
         )
 
         accounts_receivable = first_existing(
             bal_row,
             ["Accounts Receivable", "Receivables", "Accounts Notes Receivable"],
-            default=None,
+            default=0.0,
         )
 
         inventory = first_existing(
             bal_row,
             ["Inventory", "Inventories"],
-            default=None,
+            default=0.0,
         )
 
         rows.append({
             "company_name": ticker,
-            "report_period": normalize_date(date),
-            "revenue": safe_to_number(revenue),
-            "net_profit": safe_to_number(net_profit),
-            "operating_cashflow": safe_to_number(operating_cashflow),
-            "accounts_receivable": safe_to_number(accounts_receivable),
-            "inventory": safe_to_number(inventory),
+            "report_period": safe_date(date),
+            "revenue": revenue,
+            "net_profit": net_profit,
+            "operating_cashflow": operating_cashflow,
+            "accounts_receivable": accounts_receivable,
+            "inventory": inventory,
         })
 
     df = pd.DataFrame(rows)
@@ -126,21 +163,34 @@ def build_financial_df(bundle: dict) -> pd.DataFrame:
     ]
 
     for col in numeric_cols:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
 
-    return df.sort_values("report_period", ascending=False).reset_index(drop=True)
+    df = df.sort_values("report_period", ascending=False).reset_index(drop=True)
+
+    return df
 
 
 def get_revenue_chart_df(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty or "revenue" not in df.columns:
-        return pd.DataFrame()
+    if df is None or df.empty or "revenue" not in df.columns:
+        return pd.DataFrame(columns=["report_period", "revenue_billion"])
 
     chart_df = df[["report_period", "revenue"]].copy()
-    chart_df = chart_df.dropna(subset=["revenue"])
+    chart_df["revenue"] = pd.to_numeric(chart_df["revenue"], errors="coerce").fillna(0.0)
     chart_df = chart_df.sort_values("report_period")
 
-    if chart_df.empty:
-        return pd.DataFrame()
-
     chart_df["revenue_billion"] = chart_df["revenue"] / 1e9
+
     return chart_df[["report_period", "revenue_billion"]]
+
+
+def get_profit_chart_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty or "net_profit" not in df.columns:
+        return pd.DataFrame(columns=["report_period", "profit_billion"])
+
+    chart_df = df[["report_period", "net_profit"]].copy()
+    chart_df["net_profit"] = pd.to_numeric(chart_df["net_profit"], errors="coerce").fillna(0.0)
+    chart_df = chart_df.sort_values("report_period")
+
+    chart_df["profit_billion"] = chart_df["net_profit"] / 1e9
+
+    return chart_df[["report_period", "profit_billion"]]
